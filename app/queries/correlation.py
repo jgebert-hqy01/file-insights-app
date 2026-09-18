@@ -15,6 +15,20 @@ last_loaded_at = QueryDefinition(
     run_on_load=True,
 )
 
+load_count = QueryDefinition(
+    name="correlation_file_load_count",
+    title="How many times has the file loaded?",
+    description="Count of distinct load events recorded for this file.",
+    category="Overview",
+    source="correlation_file",
+    sql="""
+        SELECT COUNT(DISTINCT FileID) AS load_count
+        FROM raw_classic.correlation.file
+        WHERE FileName = :filename
+    """,
+    run_on_load=True,
+)
+
 load_history = QueryDefinition(
     name="correlation_file_load_history",
     title="When did the file load?",
