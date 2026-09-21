@@ -58,6 +58,37 @@ print("Testing filename: {0}".format(filename))
 
 import os
 import sys
+import types
+
+# The markers that identify a directory as "the app package's contents",
+# regardless of what the directory itself is named -- Databricks' Workspace
+# Import UI does not reliably preserve a multi-folder zip's structure or
+# names (observed: importing app_src.zip as a File produced a folder named
+# after the zip, `app_src`, containing only some of the flattened top-level
+# files -- nested folders and even some flat files were silently dropped).
+# Detecting by content, not name, means this works whether the folder ends
+# up named `app`, `app_src`, or anything else, and whether it's a real
+# directory or a zipimport path.
+_APP_PACKAGE_MARKERS = (
+    os.path.join("registry", "__init__.py"),
+    os.path.join("sources", "__init__.py"),
+    os.path.join("queries", "__init__.py"),
+    "masking.py",
+    "validation.py",
+)
+
+
+def _looks_like_app_package_dir(directory):
+    return all(os.path.exists(os.path.join(directory, marker)) for marker in _APP_PACKAGE_MARKERS)
+
+
+def _register_as_app_package(directory):
+    """Makes `import app...` resolve into `directory`, whatever it's actually
+    named on disk."""
+    if "app" not in sys.modules:
+        module = types.ModuleType("app")
+        module.__path__ = [directory]
+        sys.modules["app"] = module
 
 
 def _candidate_dirs():
@@ -84,20 +115,35 @@ def _candidate_dirs():
 def _locate_and_register_app_source():
     tried = []
     for directory in _candidate_dirs():
+        # 1. A literal app_src.zip file next to the notebook.
         zip_candidate = os.path.join(directory, "app_src.zip")
         tried.append(zip_candidate)
         if os.path.isfile(zip_candidate):
             sys.path.insert(0, zip_candidate)
             return zip_candidate
+
+        # 2. A real `app` folder (Git folder checkout).
         app_dir_candidate = os.path.join(directory, "app")
         tried.append(app_dir_candidate)
-        if os.path.isdir(app_dir_candidate):
+        if os.path.isdir(app_dir_candidate) and _looks_like_app_package_dir(app_dir_candidate):
             sys.path.insert(0, directory)
-            return directory
+            return app_dir_candidate
+
+        # 3. Any subfolder that directly contains the expected registry
+        #    contents, whatever it's actually named (e.g. `app_src`, from a
+        #    Workspace Import of the zip that stripped/renamed the top level).
+        if os.path.isdir(directory):
+            for entry in sorted(os.listdir(directory)):
+                candidate = os.path.join(directory, entry)
+                tried.append(candidate)
+                if os.path.isdir(candidate) and _looks_like_app_package_dir(candidate):
+                    _register_as_app_package(candidate)
+                    return candidate
+
     raise ImportError(
-        "Could not find app_src.zip or an app/ folder next to this notebook. "
-        "Tried: {0}. Run scripts/make_smoke_bundle.py and upload dist/app_src.zip "
-        "alongside this notebook -- see docs/smoke-test.md.".format(tried)
+        "Could not find app_src.zip, an app/ folder, or any folder containing "
+        "registry/sources/queries/masking.py/validation.py next to this "
+        "notebook. Tried: {0}. See docs/smoke-test.md.".format(tried)
     )
 
 

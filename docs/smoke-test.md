@@ -32,22 +32,42 @@ above (no Streamlit, no SQL connector, no `app/db` or `app/ui`).
    (or create) a folder for this, e.g. your user folder.
 2. Click the kebab menu (`...`) on that folder and choose **Import**.
 3. In the Import dialog, choose **File**, and upload `dist/app_src.zip`.
-   Databricks will place it in the folder as a workspace file named
-   `app_src.zip`.
 4. Import again, this time uploading `notebooks/smoke_test.py` from the
    repo. Since it starts with the `# Databricks notebook source` header,
    Databricks recognizes it as a notebook (source format) and opens it as
    one, not as a plain text file.
-5. Confirm both `app_src.zip` and the `smoke_test` notebook end up in the
-   **same folder** -- the notebook looks for the zip next to itself.
+
+**Known issue:** Databricks' Workspace Import UI does not reliably preserve
+a multi-folder zip's structure. Observed behavior (2026-09-21): importing
+`app_src.zip` as a File produced a folder named after the zip (`app_src`)
+containing only some of the flattened top-level files -- nested folders
+(`registry/`, `sources/`, `queries/`) and even `validation.py` were
+silently dropped. `notebooks/smoke_test.py` detects the app package by
+*content* (looking for `registry/__init__.py`, `sources/__init__.py`,
+`queries/__init__.py`, `masking.py`, `validation.py` inside a folder,
+whatever that folder is actually named) specifically to tolerate this, but
+it still needs those files to actually be there. If the import drops
+files, finish the structure by hand:
+
+1. Inside the resulting folder (e.g. `app_src`), use the kebab menu →
+   **Create → Folder** to create `registry`, `sources`, and `queries`.
+2. For each, click into it and use kebab menu → **Import → File** to
+   upload the matching files from your local checkout:
+   - `registry/`: `app/registry/__init__.py`, `app/registry/loader.py`, `app/registry/models.py`
+   - `sources/`: `app/sources/__init__.py`, `app/sources/correlation.py`
+   - `queries/`: `app/queries/__init__.py`, `app/queries/correlation.py`
+3. Back at the folder root, re-import any flat file that got dropped (in
+   the observed case, `app/validation.py`).
+4. Re-run the notebook -- the "Locate and import the registry" cell prints
+   which directory it used; confirm it's the one you just finished.
 
 **Alternative, for later:** once Databricks is linked to GitHub (**Settings
 → Linked accounts → Git integration**), you can instead create a **Git
 folder** from this repo's URL and open `notebooks/smoke_test.py` directly
-from there. In that case skip building the bundle -- the notebook falls
-back to importing directly from the real `app/` folder in the Git folder
-checkout, and step 5 above doesn't apply since there's no zip to keep
-alongside it.
+from there. Git folders correctly preserve the whole file tree, so this
+sidesteps the zip-import issue entirely -- skip building the bundle; the
+notebook falls back to importing directly from the real `app/` folder in
+the Git folder checkout.
 
 ### 3. Open the notebook and attach compute
 
