@@ -1,5 +1,7 @@
-"""Builds dist/app_src.zip: just the registry-side code the smoke test
-notebook needs (no Streamlit, no SQL connector, no app/db or app/ui).
+"""Builds dist/app_src.zip: just the registry-side code notebooks need (no
+Streamlit, no SQL connector). Includes the shared executor interface and the
+Spark executor (app/db/executor.py, app/db/spark_client.py) but not
+app/db/client.py, which needs databricks-sql-connector.
 
 Pure stdlib, Python 3.9-compatible. Run from anywhere; paths are resolved
 relative to this file's location in the repo:
@@ -18,7 +20,14 @@ DIST_DIR = REPO_ROOT / "dist"
 OUTPUT_ZIP = DIST_DIR / "app_src.zip"
 
 INCLUDED_DIRS = ("app/registry", "app/sources", "app/queries")
-INCLUDED_FILES = ("app/__init__.py", "app/masking.py", "app/validation.py")
+INCLUDED_FILES = (
+    "app/__init__.py",
+    "app/masking.py",
+    "app/validation.py",
+    "app/db/__init__.py",
+    "app/db/executor.py",
+    "app/db/spark_client.py",
+)
 
 
 def _iter_included_paths():

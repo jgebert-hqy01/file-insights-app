@@ -3,7 +3,8 @@ import streamlit as st
 
 from app.auth import get_signed_in_user
 from app.config import MissingConfigError, load_config
-from app.db.client import QueryExecutionError, check_filename_exists, execute
+from app.db.client import SqlConnectorExecutor, check_filename_exists
+from app.db.executor import QueryExecutionError
 from app.registry.loader import RegistryError, load_registries
 from app.ui.questions import render_questions
 from app.ui.summary import render_summary
@@ -50,12 +51,12 @@ def main() -> None:
         st.session_state.cached_filename = filename
 
     query_cache = st.session_state.query_cache
+    executor = SqlConnectorExecutor(config, sources)
 
     def run_query(query_def, filter_values=None):
         key = (query_def.name, tuple(sorted((filter_values or {}).items())))
         if key not in query_cache:
-            query_cache[key] = execute(
-                config,
+            query_cache[key] = executor.execute(
                 query_def,
                 filename,
                 filter_values=filter_values,
@@ -82,9 +83,9 @@ def main() -> None:
 
     st.success(f"Found in: {', '.join(found_in)}")
 
-    render_summary(run_query, config.default_row_cap, sources, queries)
+    render_summary(run_query, config.default_row_cap, queries)
     st.divider()
-    render_questions(run_query, config.default_row_cap, sources, queries)
+    render_questions(run_query, config.default_row_cap, queries)
 
 
 if __name__ == "__main__":
