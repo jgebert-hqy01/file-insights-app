@@ -1,0 +1,33 @@
+{
+  "name": "File Insight App",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "postCreateCommand": "pip install -r requirements.txt",
+  "postAttachCommand": "echo 'Start the app: export DATABRICKS_HOST=<workspace-host>.azuredatabricks.net DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/<warehouse-id> && streamlit run app/main.py --server.port 8501 --server.address 0.0.0.0 --server.headless true   (see docs/codespaces.md)'",
+  "forwardPorts": [8501, 8020, 8021, 8022, 8023, 8024],
+  "portsAttributes": {
+    "8501": {
+      "label": "Streamlit app",
+      "onAutoForward": "openBrowser"
+    },
+    "8020": {
+      "label": "Databricks OAuth callback",
+      "onAutoForward": "silent"
+    },
+    "8021": {
+      "label": "Databricks OAuth callback",
+      "onAutoForward": "silent"
+    },
+    "8022": {
+      "label": "Databricks OAuth callback",
+      "onAutoForward": "silent"
+    },
+    "8023": {
+      "label": "Databricks OAuth callback",
+      "onAutoForward": "silent"
+    },
+    "8024": {
+      "label": "Databricks OAuth callback",
+      "onAutoForward": "silent"
+    }
+  }
+}
