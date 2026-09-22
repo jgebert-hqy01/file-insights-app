@@ -14,6 +14,11 @@ import os
 import sys
 import time
 
+# `python scripts/smoke_test.py` puts this file's own directory (scripts/)
+# on sys.path, not the repo root -- so the `app.X`/`scripts.X` imports below
+# would otherwise fail with "No module named 'app'".
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from app.config import AppConfig, AuthMode
 from app.db.client import SqlConnectorExecutor, check_filename_exists
 from app.masking import effective_sensitive_columns

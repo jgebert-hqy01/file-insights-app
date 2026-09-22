@@ -1,4 +1,13 @@
 """Streamlit entry point."""
+import os
+import sys
+
+# `streamlit run app/main.py` puts this file's own directory (app/) on
+# sys.path, not the repo root -- so the `from app.X import Y` imports below
+# would otherwise fail with "No module named 'app'" regardless of where or
+# how this is launched (local dev, Codespaces, or App Service's startup.sh).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import streamlit as st
 
 from app.auth import get_signed_in_user
