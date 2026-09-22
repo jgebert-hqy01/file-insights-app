@@ -1,7 +1,7 @@
 """CLI smoke test: the same checks as notebooks/smoke_test.py, but running
 through the real app/db/client.py with OAuth user-to-machine auth, for
 environments where the full stack imports (e.g. GitHub Codespaces). No
-tokens. Since it reuses the real execute()/check_filename_exists()/masking
+tokens. Since it reuses the real SqlConnectorExecutor/check_filename_exists
 code paths directly, this is much shorter than the notebook, which had to
 reimplement the equivalent logic with spark.sql.
 
@@ -15,18 +15,12 @@ import sys
 import time
 
 from app.config import AppConfig, AuthMode
-from app.db.client import QueryExecutionError, check_filename_exists, execute
-from app.masking import effective_sensitive_columns, mask_dataframe
+from app.db.client import SqlConnectorExecutor, check_filename_exists
+from app.masking import effective_sensitive_columns
 from app.registry.loader import load_registries
-from app.registry.models import QueryDefinition
+from app.registry.models import QueryDefinition, SourceDefinition
 from app.validation import is_valid_filename
-from scripts.smoke_test_lib import (
-    CheckResult,
-    bogus_filename_for,
-    format_report,
-    mask_reference,
-    overall_status,
-)
+from scripts.smoke_test_lib import CheckResult, bogus_filename_for, format_report, overall_status
 
 ROW_CAP = 500
 
@@ -39,6 +33,14 @@ _CURRENT_USER_QUERY = QueryDefinition(
     category="Smoke test",
     source="__smoke_test__",
     sql="SELECT current_user() AS user_name, :filename AS smoke_test_filename",
+)
+_SMOKE_TEST_SOURCE = SourceDefinition(
+    name="__smoke_test__",
+    fully_qualified_view="smoke_test.smoke_test.smoke_test",
+    filename_column=None,
+    columns=[],
+    sensitive_columns=[],
+    description="Not a real source -- only satisfies the executor's masking lookup.",
 )
 
 
@@ -69,6 +71,14 @@ def _run(results, name, fn):
     print(format_report(results[-1:]))
 
 
+def _looks_properly_masked(value):
+    """Structural check: every character except the last 4 must be '*'."""
+    text = str(value)
+    if len(text) <= 4:
+        return text == "*" * len(text)
+    return text[:-4] == "*" * (len(text) - 4)
+
+
 def main():
     if len(sys.argv) != 2:
         raise SystemExit("Usage: python scripts/smoke_test.py <filename>")
@@ -79,11 +89,14 @@ def main():
 
     config = _build_config()
     results = []
-    state = {"sources": {}, "queries": {}}
+    state = {"sources": {}, "queries": {}, "executor": None}
 
     def check_registry_loads():
         sources, queries = load_registries()
         state["sources"], state["queries"] = sources, queries
+        state["executor"] = SqlConnectorExecutor(
+            config, {**sources, "__smoke_test__": _SMOKE_TEST_SOURCE}
+        )
         return "{0} source(s), {1} query(ies), all validators passed".format(
             len(sources), len(queries)
         )
@@ -91,7 +104,7 @@ def main():
     _run(results, "Registry loads", check_registry_loads)
 
     def check_connectivity():
-        result = execute(config, _CURRENT_USER_QUERY, filename="smoke-test")
+        result = state["executor"].execute(_CURRENT_USER_QUERY, filename="smoke-test")
         return "current_user() = {0}".format(result.dataframe.iloc[0]["user_name"])
 
     _run(results, "Connectivity", check_connectivity)
@@ -116,7 +129,9 @@ def main():
         notes = []
         for query in state["queries"].values():
             filter_values = {p.name: None for p in query.parameters}
-            result = execute(config, query, filename, filter_values=filter_values, row_cap=ROW_CAP)
+            result = state["executor"].execute(
+                query, filename, filter_values=filter_values, row_cap=ROW_CAP
+            )
             notes.append("{0}: {1} row(s)".format(query.name, len(result.dataframe)))
         return "; ".join(notes)
 
@@ -126,20 +141,21 @@ def main():
         notes = []
         for query in state["queries"].values():
             source = state["sources"][query.source]
-            result = execute(config, query, filename, row_cap=ROW_CAP)
+            result = state["executor"].execute(query, filename, row_cap=ROW_CAP)
             sensitive = effective_sensitive_columns(query, source)
-            masked_df = mask_dataframe(result.dataframe, query, source)
             if not sensitive:
                 notes.append("{0}: no sensitive columns declared".format(query.name))
                 continue
             for column in sensitive & set(result.dataframe.columns):
-                for raw, masked in zip(result.dataframe[column], masked_df[column]):
-                    if masked != mask_reference(raw):
-                        raise AssertionError(
-                            "{0}.{1}: masked value did not match the expected "
-                            "masking formula".format(query.name, column)
+                if not result.dataframe[column].map(_looks_properly_masked).all():
+                    raise AssertionError(
+                        "{0}.{1}: a value did not look properly masked".format(
+                            query.name, column
                         )
-            notes.append("{0}: masked columns {1} verified".format(query.name, sorted(sensitive)))
+                    )
+            notes.append("{0}: masked columns {1} look correctly masked".format(
+                query.name, sorted(sensitive)
+            ))
         return "; ".join(notes)
 
     _run(results, "Masking", check_masking)
@@ -147,7 +163,7 @@ def main():
     def check_row_cap():
         notes = []
         for query in state["queries"].values():
-            tiny_cap_result = execute(config, query, filename, row_cap=1)
+            tiny_cap_result = state["executor"].execute(query, filename, row_cap=1)
             notes.append("{0}: row_cap_hit={1}".format(query.name, tiny_cap_result.row_cap_hit))
         return "; ".join(notes)
 

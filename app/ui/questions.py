@@ -3,9 +3,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 import streamlit as st
 
-from app.db.client import QueryExecutionError, QueryResult
-from app.masking import mask_dataframe
-from app.registry.models import ParameterControl, QueryDefinition, QueryParameter, SourceDefinition
+from app.db.executor import QueryExecutionError, QueryResult
+from app.registry.models import ParameterControl, QueryDefinition, QueryParameter
 from app.ui.components import render_footer, render_table
 
 RunQuery = Callable[[QueryDefinition, Optional[Dict]], QueryResult]
@@ -25,7 +24,6 @@ def _render_parameter_control(parameter: QueryParameter, key_prefix: str) -> Any
 def render_questions(
     run_query: RunQuery,
     row_cap: int,
-    sources: Dict[str, SourceDefinition],
     queries: Dict[str, QueryDefinition],
 ) -> None:
     drilldown_queries = [q for q in queries.values() if not q.run_on_load]
@@ -50,12 +48,10 @@ def render_questions(
         )
 
     if st.button("Run", key=f"run_{query_def.name}"):
-        source = sources[query_def.source]
         try:
             result = run_query(query_def, filter_values)
         except QueryExecutionError as exc:
             st.error(f"Could not run '{query_def.title}': {exc}")
             return
-        masked = mask_dataframe(result.dataframe, query_def, source)
-        render_table(masked, result.row_cap_hit, row_cap)
+        render_table(result.dataframe, result.row_cap_hit, row_cap)
         render_footer(query_def, result.ran_at, result.latency_seconds)

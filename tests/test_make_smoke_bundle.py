@@ -39,8 +39,12 @@ def test_bundle_contains_expected_files_and_excludes_app_layer(tmp_path, monkeyp
     assert "app/queries/correlation.py" in names
     assert "app/masking.py" in names
     assert "app/validation.py" in names
+    assert "app/db/__init__.py" in names
+    assert "app/db/executor.py" in names
+    assert "app/db/spark_client.py" in names
 
-    assert not any(name.startswith("app/db/") for name in names)
+    # client.py needs databricks-sql-connector -- never bundled.
+    assert "app/db/client.py" not in names
     assert not any(name.startswith("app/ui/") for name in names)
     assert "app/main.py" not in names
     assert "app/config.py" not in names
@@ -53,6 +57,7 @@ def test_pkgutil_discovers_sources_and_queries_from_the_zip(tmp_path, monkeypatc
     script = (
         "import sys; sys.path.insert(0, sys.argv[1]); "
         "from app.registry.loader import load_queries, load_sources; "
+        "from app.db.spark_client import SparkExecutor, check_filename_exists, describe_columns; "
         "sources = load_sources(); queries = load_queries(); "
         "assert 'correlation_file' in sources, sources; "
         "assert 'correlation_file_last_loaded_at' in queries, queries; "

@@ -8,7 +8,6 @@ never as a change to the SQL text.
 """
 import logging
 import time
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -22,6 +21,8 @@ from databricks.sql.parameters.native import (
 )
 
 from app.config import AppConfig, AuthMode
+from app.db.executor import NotReadOnlyError, QueryExecutionError, QueryExecutor, QueryResult
+from app.masking import mask_dataframe
 from app.registry.models import ParameterType, QueryDefinition, SourceDefinition
 from app.registry.models import is_read_only_sql as _is_read_only_sql
 
@@ -32,23 +33,6 @@ _PARAMETER_TYPE_TO_CLASS = {
     ParameterType.INTEGER: IntegerParameter,
     ParameterType.DATE: DateParameter,
 }
-
-
-class NotReadOnlyError(ValueError):
-    """Raised when a statement does not start with SELECT or WITH."""
-
-
-class QueryExecutionError(RuntimeError):
-    """Raised when the warehouse call fails, times out, or the warehouse is cold-starting."""
-
-
-@dataclass
-class QueryResult:
-    query_name: str
-    dataframe: pd.DataFrame
-    ran_at: float
-    latency_seconds: float
-    row_cap_hit: bool
 
 
 def is_read_only_statement(sql: str) -> bool:
@@ -95,55 +79,64 @@ def _connect(config: AppConfig):
     )
 
 
-def execute(
-    config: AppConfig,
-    query_def: QueryDefinition,
-    filename: str,
-    filter_values: Optional[Dict[str, Any]] = None,
-    row_cap: Optional[int] = None,
-) -> QueryResult:
-    """Run a single QueryDefinition against the configured warehouse."""
-    if not is_read_only_statement(query_def.sql):
-        raise NotReadOnlyError(
-            f"Refusing to execute '{query_def.name}': SQL must start with SELECT or WITH."
+class SqlConnectorExecutor(QueryExecutor):
+    """Runs QueryDefinitions via databricks-sql-connector."""
+
+    def __init__(self, config: AppConfig, sources: Dict[str, SourceDefinition]):
+        self.config = config
+        self.sources = sources
+
+    def execute(
+        self,
+        query_def: QueryDefinition,
+        filename: str,
+        filter_values: Optional[Dict[str, Any]] = None,
+        row_cap: Optional[int] = None,
+    ) -> QueryResult:
+        if not is_read_only_statement(query_def.sql):
+            raise NotReadOnlyError(
+                f"Refusing to execute '{query_def.name}': SQL must start with SELECT or WITH."
+            )
+
+        bind_parameters = _build_bind_parameters(query_def, filename, filter_values or {})
+        effective_cap = row_cap if row_cap is not None else query_def.row_cap
+
+        ran_at = time.time()
+        started_at = time.monotonic()
+        try:
+            with _connect(self.config) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(query_def.sql, parameters=bind_parameters)
+                    if effective_cap is not None:
+                        rows = cursor.fetchmany(effective_cap + 1)
+                        row_cap_hit = len(rows) > effective_cap
+                        rows = rows[:effective_cap]
+                    else:
+                        rows = cursor.fetchall()
+                        row_cap_hit = False
+                    columns = [col[0] for col in cursor.description] if cursor.description else []
+                    dataframe = pd.DataFrame([tuple(row) for row in rows], columns=columns)
+        except Exception as exc:
+            raise QueryExecutionError(f"Query '{query_def.name}' failed: {exc}") from exc
+        latency = time.monotonic() - started_at
+
+        source = self.sources[query_def.source]
+        dataframe = mask_dataframe(dataframe, query_def, source)
+
+        logger.info(
+            "query_run query_name=%s latency_seconds=%.3f row_count=%d row_cap_hit=%s",
+            query_def.name,
+            latency,
+            len(dataframe),
+            row_cap_hit,
         )
-
-    bind_parameters = _build_bind_parameters(query_def, filename, filter_values or {})
-    effective_cap = row_cap if row_cap is not None else query_def.row_cap
-
-    ran_at = time.time()
-    started_at = time.monotonic()
-    try:
-        with _connect(config) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(query_def.sql, parameters=bind_parameters)
-                if effective_cap is not None:
-                    rows = cursor.fetchmany(effective_cap + 1)
-                    row_cap_hit = len(rows) > effective_cap
-                    rows = rows[:effective_cap]
-                else:
-                    rows = cursor.fetchall()
-                    row_cap_hit = False
-                columns = [col[0] for col in cursor.description] if cursor.description else []
-                dataframe = pd.DataFrame([tuple(row) for row in rows], columns=columns)
-    except Exception as exc:
-        raise QueryExecutionError(f"Query '{query_def.name}' failed: {exc}") from exc
-    latency = time.monotonic() - started_at
-
-    logger.info(
-        "query_run query_name=%s latency_seconds=%.3f row_count=%d row_cap_hit=%s",
-        query_def.name,
-        latency,
-        len(dataframe),
-        row_cap_hit,
-    )
-    return QueryResult(
-        query_name=query_def.name,
-        dataframe=dataframe,
-        ran_at=ran_at,
-        latency_seconds=latency,
-        row_cap_hit=row_cap_hit,
-    )
+        return QueryResult(
+            query_name=query_def.name,
+            dataframe=dataframe,
+            ran_at=ran_at,
+            latency_seconds=latency,
+            row_cap_hit=row_cap_hit,
+        )
 
 
 def check_filename_exists(config: AppConfig, source: SourceDefinition, filename: str) -> bool:

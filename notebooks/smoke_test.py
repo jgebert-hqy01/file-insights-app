@@ -8,6 +8,10 @@
 # MAGIC 2. The registry, validators, query definitions, existence check, masking,
 # MAGIC    and row cap logic hold up against real data.
 # MAGIC
+# MAGIC Runs queries through the same `SparkExecutor` (`app/db/spark_client.py`)
+# MAGIC that `notebooks/demo_app.py` uses -- masking and the row cap are applied
+# MAGIC inside the executor, not by this notebook.
+# MAGIC
 # MAGIC ## Quick steps
 # MAGIC 1. Attach this notebook to compute (serverless, or a Unity Catalog-enabled
 # MAGIC    cluster on DBR 14+).
@@ -52,7 +56,9 @@ print("Testing filename: {0}".format(filename))
 # MAGIC Looks for `app_src.zip` next to this notebook first (manual upload path),
 # MAGIC then an `app/` folder (Git folder path), trying a couple of candidate
 # MAGIC directories since notebook-directory detection varies slightly by compute
-# MAGIC type. See `docs/smoke-test.md` step 1 if neither is found.
+# MAGIC type. Detects the app package by *content*, not by name, since
+# MAGIC Databricks' Workspace Import UI does not reliably preserve a multi-folder
+# MAGIC zip's structure or names -- see `docs/smoke-test.md` if this cell fails.
 
 # COMMAND ----------
 
@@ -60,21 +66,14 @@ import os
 import sys
 import types
 
-# The markers that identify a directory as "the app package's contents",
-# regardless of what the directory itself is named -- Databricks' Workspace
-# Import UI does not reliably preserve a multi-folder zip's structure or
-# names (observed: importing app_src.zip as a File produced a folder named
-# after the zip, `app_src`, containing only some of the flattened top-level
-# files -- nested folders and even some flat files were silently dropped).
-# Detecting by content, not name, means this works whether the folder ends
-# up named `app`, `app_src`, or anything else, and whether it's a real
-# directory or a zipimport path.
 _APP_PACKAGE_MARKERS = (
     os.path.join("registry", "__init__.py"),
     os.path.join("sources", "__init__.py"),
     os.path.join("queries", "__init__.py"),
     "masking.py",
     "validation.py",
+    os.path.join("db", "executor.py"),
+    os.path.join("db", "spark_client.py"),
 )
 
 
@@ -83,8 +82,6 @@ def _looks_like_app_package_dir(directory):
 
 
 def _register_as_app_package(directory):
-    """Makes `import app...` resolve into `directory`, whatever it's actually
-    named on disk."""
     if "app" not in sys.modules:
         module = types.ModuleType("app")
         module.__path__ = [directory]
@@ -115,23 +112,18 @@ def _candidate_dirs():
 def _locate_and_register_app_source():
     tried = []
     for directory in _candidate_dirs():
-        # 1. A literal app_src.zip file next to the notebook.
         zip_candidate = os.path.join(directory, "app_src.zip")
         tried.append(zip_candidate)
         if os.path.isfile(zip_candidate):
             sys.path.insert(0, zip_candidate)
             return zip_candidate
 
-        # 2. A real `app` folder (Git folder checkout).
         app_dir_candidate = os.path.join(directory, "app")
         tried.append(app_dir_candidate)
         if os.path.isdir(app_dir_candidate) and _looks_like_app_package_dir(app_dir_candidate):
             sys.path.insert(0, directory)
             return app_dir_candidate
 
-        # 3. Any subfolder that directly contains the expected registry
-        #    contents, whatever it's actually named (e.g. `app_src`, from a
-        #    Workspace Import of the zip that stripped/renamed the top level).
         if os.path.isdir(directory):
             for entry in sorted(os.listdir(directory)):
                 candidate = os.path.join(directory, entry)
@@ -142,17 +134,18 @@ def _locate_and_register_app_source():
 
     raise ImportError(
         "Could not find app_src.zip, an app/ folder, or any folder containing "
-        "registry/sources/queries/masking.py/validation.py next to this "
-        "notebook. Tried: {0}. See docs/smoke-test.md.".format(tried)
+        "the expected registry/executor contents next to this notebook. "
+        "Tried: {0}. See docs/smoke-test.md.".format(tried)
     )
 
 
 source_location = _locate_and_register_app_source()
 print("Using app source from: {0}".format(source_location))
 
-from app.masking import effective_sensitive_columns, mask_dataframe
 import pandas as pd
 
+from app.db.spark_client import SparkExecutor, check_filename_exists, describe_columns
+from app.masking import effective_sensitive_columns
 from app.registry.loader import load_registries
 from app.validation import is_valid_filename
 
@@ -166,10 +159,10 @@ if not is_valid_filename(filename):
 
 # MAGIC %md ### Helpers
 # MAGIC Small, obviously-correct helpers used only in this notebook. The
-# MAGIC canonical, unit-tested versions of the report builder and the masking
-# MAGIC and name-matching logic they mirror live in `scripts/smoke_test_lib.py`
-# MAGIC (tested in `tests/test_smoke_test_lib.py`) -- this notebook can't import
-# MAGIC that module directly since it isn't part of `app_src.zip`.
+# MAGIC canonical, unit-tested version of the masking-reference formula lives in
+# MAGIC `scripts/smoke_test_lib.py` (tested in `tests/test_smoke_test_lib.py`) --
+# MAGIC this notebook can't import that module directly since it isn't part of
+# MAGIC `app_src.zip`.
 
 # COMMAND ----------
 
@@ -238,6 +231,15 @@ run_check("Registry loads", _check_registry_loads)
 
 # COMMAND ----------
 
+# MAGIC %md Construct the shared executor now that the registry has loaded --
+# MAGIC the same `SparkExecutor` class `notebooks/demo_app.py` uses.
+
+# COMMAND ----------
+
+spark_executor = SparkExecutor(spark, sources)
+
+# COMMAND ----------
+
 # MAGIC %md ## Check 2: Connectivity
 
 # COMMAND ----------
@@ -263,17 +265,10 @@ run_check("Connectivity", _check_connectivity)
 # COMMAND ----------
 
 
-def _describe_columns(fully_qualified_view):
-    rows = spark.sql(
-        "DESCRIBE TABLE IDENTIFIER(:fqn)", args={"fqn": fully_qualified_view}
-    ).collect()
-    return {r["col_name"]: r["data_type"] for r in rows if not r["col_name"].startswith("#")}
-
-
 def _check_sources_reachable():
     notes = []
     for source in sources.values():
-        actual_columns = _describe_columns(source.fully_qualified_view)
+        actual_columns = describe_columns(spark, source.fully_qualified_view)
         declared = {c.name: c.data_type for c in source.columns}
 
         missing = sorted(set(declared) - set(actual_columns))
@@ -314,23 +309,11 @@ run_check("Sources reachable", _check_sources_reachable)
 
 # MAGIC %md ## Check 4: Existence check
 # MAGIC Same parameterized-lookup logic as `check_filename_exists` in
-# MAGIC `app/db/client.py`, reimplemented with `spark.sql` instead of the SQL
-# MAGIC connector. Runs for the real filename (expect matches) and a derived
-# MAGIC bogus filename (expect none).
+# MAGIC `app/db/client.py` (and `app/db/spark_client.py`, used here). Runs for
+# MAGIC the real filename (expect matches) and a derived bogus filename (expect
+# MAGIC none).
 
 # COMMAND ----------
-
-
-def _exists(source, name_to_check):
-    rows = spark.sql(
-        "SELECT 1 FROM IDENTIFIER(:fqn) WHERE IDENTIFIER(:col) = :filename LIMIT 1",
-        args={
-            "fqn": source.fully_qualified_view,
-            "col": source.filename_column,
-            "filename": name_to_check,
-        },
-    ).collect()
-    return len(rows) > 0
 
 
 def _check_existence():
@@ -338,8 +321,10 @@ def _check_existence():
     if not filename_sources:
         return "no sources declare a filename_column"
 
-    found_in = [s.name for s in filename_sources if _exists(s, filename)]
-    bogus_hits = [s.name for s in filename_sources if _exists(s, BOGUS_FILENAME)]
+    found_in = [s.name for s in filename_sources if check_filename_exists(spark, s, filename)]
+    bogus_hits = [
+        s.name for s in filename_sources if check_filename_exists(spark, s, BOGUS_FILENAME)
+    ]
 
     if not found_in:
         raise AssertionError(
@@ -361,10 +346,12 @@ run_check("Existence check", _check_existence)
 # COMMAND ----------
 
 # MAGIC %md ## Check 5: Summary queries (run_on_load)
+# MAGIC Runs through `spark_executor.execute()` -- masking and the row cap are
+# MAGIC already applied to the returned result.
 
 # COMMAND ----------
 
-summary_results = {}  # query name -> (pandas.DataFrame, row_count)
+summary_results = {}  # query name -> QueryResult (already masked, capped)
 
 
 def _check_summary_queries():
@@ -372,16 +359,9 @@ def _check_summary_queries():
     for query in queries.values():
         if not query.run_on_load:
             continue
-        # Bind every declared parameter as NULL, same as the real app does
-        # for run_on_load queries (it never renders filter controls for them).
-        args = {"filename": filename}
-        for parameter in query.parameters:
-            args[parameter.name] = None
-        df = spark.sql(query.sql, args=args).limit(ROW_CAP + 1)
-        pdf = df.toPandas()
-        row_count = min(len(pdf), ROW_CAP)
-        summary_results[query.name] = (pdf.head(ROW_CAP), row_count)
-        notes.append("{0}: {1} row(s)".format(query.name, row_count))
+        result = spark_executor.execute(query, filename, row_cap=ROW_CAP)
+        summary_results[query.name] = result
+        notes.append("{0}: {1} row(s)".format(query.name, len(result.dataframe)))
     if not notes:
         return "no run_on_load queries defined"
     return "; ".join(notes)
@@ -392,13 +372,14 @@ run_check("Summary queries", _check_summary_queries)
 # COMMAND ----------
 
 # MAGIC %md ## Check 6: Drill-down queries
-# MAGIC Each runs twice: once with every optional filter unset (bound as SQL
-# MAGIC `NULL`, matching the `VoidParameter` semantics `app/db/client.py` uses),
-# MAGIC and once with a sampled real value for each filter.
+# MAGIC Each runs twice through `spark_executor.execute()`: once with every
+# MAGIC optional filter unset (bound as SQL `NULL`), and once with a sampled
+# MAGIC real value for each filter.
 
 # COMMAND ----------
 
-drilldown_results = {}  # (query name, "unset"/"filtered") -> (pandas.DataFrame, row_count)
+drilldown_results = {}  # (query name, "unset"/"filtered") -> QueryResult
+drilldown_filter_values = {}  # (query name, "unset"/"filtered") -> filter_values used
 
 
 def _sample_parameter_value(source, parameter):
@@ -422,33 +403,30 @@ def _sample_parameter_value(source, parameter):
     return rows[0]["sampled_value"] if rows else None
 
 
-def _run_drilldown(query, filter_values):
-    args = {"filename": filename}
-    for parameter in query.parameters:
-        args[parameter.name] = filter_values.get(parameter.name)
-    df = spark.sql(query.sql, args=args).limit(ROW_CAP + 1)
-    pdf = df.toPandas()
-    row_count = min(len(pdf), ROW_CAP)
-    return pdf.head(ROW_CAP), row_count
-
-
 def _check_drilldown_queries():
     notes = []
-    source_by_name = sources
     for query in queries.values():
         if query.run_on_load:
             continue
-        source = source_by_name[query.source]
+        source = sources[query.source]
 
-        pdf_unset, count_unset = _run_drilldown(query, {})
-        drilldown_results[(query.name, "unset")] = (pdf_unset, count_unset)
-        notes.append("{0} (filters unset): {1} row(s)".format(query.name, count_unset))
+        result_unset = spark_executor.execute(query, filename, filter_values={}, row_cap=ROW_CAP)
+        drilldown_results[(query.name, "unset")] = result_unset
+        drilldown_filter_values[(query.name, "unset")] = {}
+        notes.append(
+            "{0} (filters unset): {1} row(s)".format(query.name, len(result_unset.dataframe))
+        )
 
         sampled = {p.name: _sample_parameter_value(source, p) for p in query.parameters}
-        pdf_filtered, count_filtered = _run_drilldown(query, sampled)
-        drilldown_results[(query.name, "filtered")] = (pdf_filtered, count_filtered)
+        result_filtered = spark_executor.execute(
+            query, filename, filter_values=sampled, row_cap=ROW_CAP
+        )
+        drilldown_results[(query.name, "filtered")] = result_filtered
+        drilldown_filter_values[(query.name, "filtered")] = sampled
         notes.append(
-            "{0} (filters={1}): {2} row(s)".format(query.name, sampled, count_filtered)
+            "{0} (filters={1}): {2} row(s)".format(
+                query.name, sampled, len(result_filtered.dataframe)
+            )
         )
     if not notes:
         return "no drill-down queries defined"
@@ -460,39 +438,48 @@ run_check("Drill-down queries", _check_drilldown_queries)
 # COMMAND ----------
 
 # MAGIC %md ## Check 7: Masking
-# MAGIC Applies `app.masking.mask_dataframe` to every result above and checks
-# MAGIC the output against an independent reimplementation of the masking
-# MAGIC formula -- not by calling the same code twice.
+# MAGIC The results captured above are already masked (the executor does that).
+# MAGIC To verify masking independently, this check re-fetches each query's raw
+# MAGIC (unmasked) data directly via `spark.sql` -- bypassing the executor on
+# MAGIC purpose, since that's the only way to get something to compare against --
+# MAGIC and checks it against an independent reimplementation of the masking
+# MAGIC formula, not by calling `app.masking` a second time.
 
 # COMMAND ----------
 
 masked_samples = {}  # label -> masked pandas.DataFrame (sample only, <=5 rows)
 
 
+def _fetch_raw(query_def, filter_values):
+    args = {"filename": filename}
+    for parameter in query_def.parameters:
+        args[parameter.name] = (filter_values or {}).get(parameter.name)
+    pdf = spark.sql(query_def.sql, args=args).limit(ROW_CAP + 1).toPandas()
+    return pdf.head(ROW_CAP)
+
+
 def _check_masking():
     notes = []
-    # (label, query, pdf) -- looked up by query name directly, not by
-    # string-prefix matching, so one query's name being a prefix of
-    # another's can never cause a mismatch.
-    labeled_results = []
-    for query_name, (pdf, _row_count) in summary_results.items():
-        labeled_results.append((query_name, queries[query_name], pdf))
-    for (query_name, variant), (pdf, _row_count) in drilldown_results.items():
+    labeled_results = []  # (label, query, result, filter_values_used)
+    for query_name, result in summary_results.items():
+        labeled_results.append((query_name, queries[query_name], result, {}))
+    for (query_name, variant), result in drilldown_results.items():
         label = "{0} ({1})".format(query_name, variant)
-        labeled_results.append((label, queries[query_name], pdf))
+        filter_values = drilldown_filter_values[(query_name, variant)]
+        labeled_results.append((label, queries[query_name], result, filter_values))
 
-    for label, query, pdf in labeled_results:
+    for label, query, result, filter_values in labeled_results:
         source = sources[query.source]
         sensitive = effective_sensitive_columns(query, source)
-        masked_pdf = mask_dataframe(pdf, query, source)
-        masked_samples[label] = masked_pdf.head(5)
+        masked_samples[label] = result.dataframe.head(5)
 
         if not sensitive:
             notes.append("{0}: no sensitive columns declared".format(label))
             continue
 
-        for column in sensitive & set(pdf.columns):
-            for raw, masked in zip(pdf[column], masked_pdf[column]):
+        raw_pdf = _fetch_raw(query, filter_values)
+        for column in sensitive & set(raw_pdf.columns):
+            for raw, masked in zip(raw_pdf[column], result.dataframe[column]):
                 expected = mask_reference(raw)
                 if masked != expected:
                     raise AssertionError(
@@ -523,7 +510,7 @@ for label, masked_pdf in masked_samples.items():
 # MAGIC %md ## Check 8: Row cap
 # MAGIC First proves the cap+1 truncation-detection arithmetic itself against a
 # MAGIC synthetic relation with a known row count (independent of how much real
-# MAGIC data exists today), then reports what the same logic sees on a real
+# MAGIC data exists today), then reports what `spark_executor` sees on a real
 # MAGIC registry query.
 
 # COMMAND ----------
@@ -549,13 +536,9 @@ def _check_row_cap():
     real_query = next((q for q in queries.values() if q.run_on_load), None)
     if real_query is None:
         return "synthetic cases passed; no run_on_load query to sample against ROW_CAP"
-    real_args = {"filename": filename}
-    for parameter in real_query.parameters:
-        real_args[parameter.name] = None
-    real_df = spark.sql(real_query.sql, args=real_args)
-    _real_rows, real_hit = _fetch_with_cap(real_df, cap=ROW_CAP)
+    real_result = spark_executor.execute(real_query, filename, row_cap=ROW_CAP)
     return "synthetic cases passed; '{0}' against ROW_CAP={1}: hit={2}".format(
-        real_query.name, ROW_CAP, real_hit
+        real_query.name, ROW_CAP, real_result.row_cap_hit
     )
 
 

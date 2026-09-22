@@ -1,4 +1,5 @@
-"""Tests for the Databricks client: read-only enforcement and parameter binding.
+"""Tests for the SQL-connector executor: read-only enforcement, parameter
+binding, and masking.
 
 These use a mocked connector throughout -- no test here calls out to a real
 Databricks SQL Warehouse.
@@ -8,14 +9,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.config import AppConfig, AuthMode
-from app.db.client import (
-    NotReadOnlyError,
-    QueryExecutionError,
-    check_filename_exists,
-    execute,
-    is_read_only_statement,
-)
+from app.db.client import SqlConnectorExecutor, check_filename_exists, is_read_only_statement
+from app.db.executor import NotReadOnlyError, QueryExecutionError
 from app.registry.models import (
+    ColumnDefinition,
     ParameterControl,
     ParameterType,
     QueryDefinition,
@@ -29,14 +26,33 @@ CONFIG = AppConfig(
     auth_mode=AuthMode.LOCAL_INTERACTIVE,
 )
 
+SOURCES = {
+    "test_source": SourceDefinition(
+        name="test_source",
+        fully_qualified_view="catalog.schema.view",
+        filename_column="FileName",
+        columns=[],
+        sensitive_columns=[],
+        description="test",
+    ),
+    "sensitive_source": SourceDefinition(
+        name="sensitive_source",
+        fully_qualified_view="catalog.schema.view",
+        filename_column="FileName",
+        columns=[ColumnDefinition(name="SSN", data_type="string")],
+        sensitive_columns=["SSN"],
+        description="test",
+    ),
+}
 
-def _query(sql, parameters=None, row_cap=None):
+
+def _query(sql, parameters=None, row_cap=None, source="test_source"):
     return QueryDefinition(
         name="test_query",
         title="Test",
         description="Test",
         category="Test",
-        source="test_source",
+        source=source,
         sql=sql,
         parameters=parameters or [],
         row_cap=row_cap,
@@ -62,8 +78,9 @@ def test_is_read_only_statement_rejects_other_statements():
 def test_execute_refuses_non_select_even_if_the_object_is_mutated_after_validation():
     query_def = _query("SELECT 1 AS x WHERE 1 = :filename")
     query_def.sql = "DELETE FROM samples.nyctaxi.trips WHERE id = :filename"
+    executor = SqlConnectorExecutor(CONFIG, SOURCES)
     with pytest.raises(NotReadOnlyError):
-        execute(CONFIG, query_def, "sample_file_001.csv")
+        executor.execute(query_def, "sample_file_001.csv")
 
 
 @patch("app.db.client.databricks_sql.connect")
@@ -84,7 +101,8 @@ def test_execute_binds_filename_and_declared_parameters(mock_connect):
         ],
     )
 
-    result = execute(CONFIG, query_def, "sample_file_001.csv", filter_values={"partner_id": 42})
+    executor = SqlConnectorExecutor(CONFIG, SOURCES)
+    result = executor.execute(query_def, "sample_file_001.csv", filter_values={"partner_id": 42})
 
     args, kwargs = cursor.execute.call_args
     assert args[0] == query_def.sql
@@ -113,7 +131,8 @@ def test_execute_binds_missing_optional_filter_as_typed_null(mock_connect):
         ],
     )
 
-    execute(CONFIG, query_def, "sample_file_001.csv", filter_values={"partner_id": None})
+    executor = SqlConnectorExecutor(CONFIG, SOURCES)
+    executor.execute(query_def, "sample_file_001.csv", filter_values={"partner_id": None})
 
     _, kwargs = cursor.execute.call_args
     partner_param = next(p for p in kwargs["parameters"] if p.name == "partner_id")
@@ -128,7 +147,8 @@ def test_execute_applies_row_cap_and_reports_when_it_was_hit(mock_connect):
 
     query_def = _query("SELECT col1 FROM t WHERE FileName = :filename", row_cap=2)
 
-    result = execute(CONFIG, query_def, "sample_file_001.csv")
+    executor = SqlConnectorExecutor(CONFIG, SOURCES)
+    result = executor.execute(query_def, "sample_file_001.csv")
 
     cursor.fetchmany.assert_called_once_with(3)
     assert len(result.dataframe) == 2
@@ -136,25 +156,35 @@ def test_execute_applies_row_cap_and_reports_when_it_was_hit(mock_connect):
 
 
 @patch("app.db.client.databricks_sql.connect")
+def test_execute_masks_sensitive_columns_before_returning(mock_connect):
+    cursor = _mock_cursor(mock_connect)
+    cursor.fetchall.return_value = [("XXX-XX-1234",)]
+    cursor.description = [("SSN", None)]
+
+    query_def = _query(
+        "SELECT SSN FROM t WHERE FileName = :filename", source="sensitive_source"
+    )
+
+    executor = SqlConnectorExecutor(CONFIG, SOURCES)
+    result = executor.execute(query_def, "sample_file_001.csv")
+
+    assert result.dataframe.iloc[0]["SSN"] == "*******1234"
+
+
+@patch("app.db.client.databricks_sql.connect")
 def test_execute_wraps_connector_errors(mock_connect):
     mock_connect.side_effect = RuntimeError("warehouse is starting up")
     query_def = _query("SELECT 1 AS x FROM t WHERE FileName = :filename")
 
+    executor = SqlConnectorExecutor(CONFIG, SOURCES)
     with pytest.raises(QueryExecutionError):
-        execute(CONFIG, query_def, "sample_file_001.csv")
+        executor.execute(query_def, "sample_file_001.csv")
 
 
 @patch("app.db.client.databricks_sql.connect")
 def test_check_filename_exists_true_and_false(mock_connect):
     cursor = _mock_cursor(mock_connect)
-    source = SourceDefinition(
-        name="test_source",
-        fully_qualified_view="catalog.schema.view",
-        filename_column="FileName",
-        columns=[],
-        sensitive_columns=[],
-        description="test",
-    )
+    source = SOURCES["test_source"]
 
     cursor.fetchone.return_value = (1,)
     assert check_filename_exists(CONFIG, source, "sample_file_001.csv") is True
