@@ -5,6 +5,11 @@ own Databricks identity, with no provisioning and no stored tokens. Same
 `local_interactive` (OAuth U2M) auth path as running locally; no code
 changes needed for Codespaces.
 
+**Use VS Code Desktop connected to the Codespace, not the browser-only
+editor.** The OAuth login redirects to `http://localhost:<port>/...`, and
+only VS Code Desktop's local tunnel can actually catch that -- confirmed by
+a real failed attempt in the browser editor (2026-09-23), see below.
+
 ## Start it
 
 1. Open this repo in a Codespace (**Code → Codespaces → Create codespace**).
@@ -44,22 +49,25 @@ assumed):
    redirect and completes the login.
 
 For step 2 to actually reach the container, `localhost:<port>` in your
-browser has to tunnel back into the codespace. This works reliably when
-you're connected via **VS Code Desktop** (Remote Explorer → Codespaces),
-which transparently forwards `localhost` ports end-to-end. It is **not
-guaranteed** the same way in the browser-only editor (`github.dev` or the
-codespace's web UI with no VS Code Desktop attached), since forwarded ports
-there are exposed as HTTPS URLs
-(`https://<codespace>-8020.app.github.dev`), not literal `localhost`, and
-the OAuth redirect is hardcoded to `localhost` by the SDK. **If you hit a
-stuck or failed callback, connect with VS Code Desktop instead of the
-browser editor and retry.**
+browser has to tunnel back into the codespace. **Confirmed by an actual
+run (2026-09-23): the browser-only editor (`github.dev` or the codespace's
+web UI, with no VS Code Desktop attached) does not work for this.** The
+OAuth flow completes correctly as far as Databricks is concerned (a valid
+`code=` shows up in the failed URL), but the browser tab loading
+`http://localhost:<port>/...` gets "refused to connect." This isn't a
+timing issue or misconfiguration -- it's structural: Codespaces' browser
+editor forwards ports by rewriting *your own* links into
+`https://<codespace>-<port>.app.github.dev` URLs, but a third party
+(Databricks' OAuth server) redirecting your browser straight to
+`http://localhost:<port>/...` is not something Codespaces can intercept
+that way.
 
-I verified the fixed-port-range behavior by reading the connector/SDK
-source directly, but haven't run this end-to-end in a live Codespace
-myself. Please run the first real login and let me know what happens --
-particularly whether the browser-only editor case above actually fails or
-turns out to work, so this doc can stop hedging on it.
+**You must use VS Code Desktop** (Remote Explorer → Codespaces, or
+Command Palette → "Codespaces: Connect to Codespace...") for this OAuth
+flow to work. VS Code Desktop runs an actual local network tunnel that
+transparently catches real `localhost:<port>` traffic and routes it into
+the container -- the browser editor has no equivalent mechanism for a
+redirect it didn't originate.
 
 ## What this does and doesn't prove
 
