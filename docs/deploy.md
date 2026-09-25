@@ -81,6 +81,118 @@ set, to avoid a workflow that fails on every push. Once ready:
 4. Change the workflow's `on:` trigger from `workflow_dispatch` to
    `push: branches: [main]` once the above is in place.
 
+## Teams bot (new presentation layer, alongside Streamlit)
+
+The bot (`bot/app.py`) is a second, independent presentation layer over the
+same registry/executor code Streamlit uses -- it does not replace the
+Streamlit app, and neither depends on the other being deployed. None of
+this exists yet (as of 2026-09-25): no Azure Bot resource, no bot Entra ID
+identity, no Teams manifest, no catalog submission.
+
+### Azure resources needed
+
+- **Azure Bot resource** (Azure Bot Service), registered with the messaging
+  endpoint `https://<your-host>/api/messages`.
+- **An identity for the bot itself** -- separate from the Databricks
+  service principal, and separate from whatever identity Streamlit's App
+  Service uses for Key Vault. Prefer, in order:
+  1. **System-assigned managed identity** on whichever App Service hosts
+     `bot/app.py` (`AUTHTYPE=SystemManagedIdentity` -- no secret at all).
+  2. A dedicated **Entra ID app registration with a client secret in Key
+     Vault** (`AUTHTYPE=ClientSecret`), only if managed identity isn't
+     workable for this Azure Bot resource.
+
+  This mirrors the same "managed identity over secrets, secrets over
+  nothing" preference already used for Databricks auth -- but it's a
+  genuinely separate credential from that one. Don't reuse the Databricks
+  service principal for this.
+- **Where it runs**: either a **separate App Service** (or Container
+  App/Function) from the Streamlit app -- simplest, and what this doc
+  assumes below -- or the **same App Service**, fronted by a reverse proxy
+  that routes `/api/messages` to the bot's aiohttp process (port 3978) and
+  everything else to Streamlit's. The shared-instance path needs more
+  infrastructure (nginx or similar) that isn't built here; don't assume it
+  without deciding that explicitly first.
+
+### App settings (environment variables)
+
+Using managed identity (recommended):
+
+| Name | Value |
+| --- | --- |
+| `CONNECTIONS__SERVICE_CONNECTION__SETTINGS__AUTHTYPE` | `SystemManagedIdentity` |
+| `CONNECTIONS__SERVICE_CONNECTION__SETTINGS__SCOPES` | `https://api.botframework.com/.default` |
+| `PORT` | `3978` (or whatever `WEBSITES_PORT` is set to for this App Service) |
+| `BOT_ALLOWED_CALLER_IDS` | Comma-separated Entra object IDs, until real group-membership checking (`bot/permissions.py`) replaces the stub. |
+
+Plus the same `DATABRICKS_*` variables as the Streamlit app (`bot/app.py`
+calls the same `app/config.py`) -- see the App Service configuration
+section above.
+
+If using a client-secret app registration instead:
+
+| Name | Value |
+| --- | --- |
+| `CONNECTIONS__SERVICE_CONNECTION__SETTINGS__AUTHTYPE` | `ClientSecret` |
+| `CONNECTIONS__SERVICE_CONNECTION__SETTINGS__CLIENTID` | The app registration's Application ID. Not a secret. |
+| `CONNECTIONS__SERVICE_CONNECTION__SETTINGS__CLIENTSECRET` | `@Microsoft.KeyVault(VaultName=<vault-name>;SecretName=<secret-name>)` -- never a literal value. |
+| `CONNECTIONS__SERVICE_CONNECTION__SETTINGS__TENANTID` | The Entra tenant ID. |
+
+### Startup command
+
+```
+python bot/app.py
+```
+
+`requirements.txt` lists `microsoft-agents-hosting-aiohttp` and
+`microsoft-agents-authentication-msal` without version pins -- I couldn't
+install them locally to verify an exact version (see the repo's README/
+CLAUDE.md for why). **Pin them to whatever `pip install` actually resolves
+the first time this is deployed for real.**
+
+### No Easy Auth on `/api/messages`
+
+If the bot ends up sharing an App Service with anything that has **App
+Service Authentication (Easy Auth)** turned on (as Streamlit's does, for
+its Entra sign-in): Easy Auth would intercept Bot Framework Connector
+Service's server-to-server calls to `/api/messages` and try to redirect
+them to an interactive login page, breaking the bot entirely, since those
+calls aren't a browser session. Bot Framework has its own request
+authentication (the JWT validation `jwt_authorization_middleware` already
+does in `bot/app.py`) -- it doesn't need or want Easy Auth layered on top.
+
+If the bot gets its own, separate App Service (this doc's default
+assumption), this doesn't apply -- simply don't enable Easy Auth on that
+App Service at all. If it ever does end up sharing an instance, App
+Service Authentication V2 has an **excluded paths** setting
+(Authentication > Edit > Excluded paths) -- add `/api/messages` there
+before enabling Easy Auth on anything else on that instance.
+
+### Teams app manifest and catalog publish
+
+Package a `manifest.json` (schema version 1.17+) with at minimum:
+
+- `id`: a new GUID for this app.
+- `bots[0].botId`: the bot's Entra ID app ID (or, for managed identity, the
+  Azure Bot resource's associated app ID -- confirm which once the Bot
+  resource exists).
+- `bots[0].scopes`: `["personal"]` to start (1:1 chat); add `"team"` later
+  if channel/group use is wanted.
+- `validDomains`: empty unless the bot links out to external content.
+- `webApplicationInfo.id`: same as `bots[0].botId`, if using SSO later --
+  not needed for the caller-identity-only permission stub in
+  `bot/permissions.py`.
+
+Package the manifest with app icons into a `.zip` per [Microsoft's Teams
+app packaging
+docs](https://learn.microsoft.com/microsoftteams/platform/concepts/build-and-test/apps-package).
+
+**Catalog publish**: submitting this to HealthEquity's internal Teams app
+catalog (org-wide or a specific team) is an M365 admin-driven process this
+doc can't prescribe -- find out who administers the Teams admin center's
+**Manage apps** catalog and what HealthEquity's internal review process
+is before assuming self-service publish is available.
+
 ## View vs. base table (open item)
 
 `raw_classic.correlation.file` is currently a managed base table, not a
