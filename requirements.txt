@@ -4,3 +4,8 @@ pandas==2.3.3
 pydantic==2.13.5
 pytest==8.4.2
 jsonschema==4.23.0
+# Not version-pinned: I couldn't install these locally to verify an exact
+# version (see docs/deploy.md). Pin them to whatever `pip install` actually
+# resolves the first time this is installed for real, then update here.
+microsoft-agents-hosting-aiohttp
+microsoft-agents-authentication-msal
