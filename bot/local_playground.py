@@ -23,7 +23,7 @@ from microsoft_agents.hosting.core import AgentApplication, MemoryStorage, TurnC
 
 from app.config import load_config
 from app.registry.loader import load_registries
-from bot.handlers import handle_message
+from bot.handlers import _caller_id, handle_message  # _caller_id: diagnostic use only, see below
 
 _config = load_config()
 _sources, _queries = load_registries()
@@ -33,6 +33,11 @@ AGENT_APP = AgentApplication[TurnState](storage=MemoryStorage(), adapter=CloudAd
 
 @AGENT_APP.activity("message")
 async def _on_message(context: TurnContext, _state: TurnState) -> None:
+    # bot/permissions.py denies by default. Printing the caller id the
+    # Playground's simulated user presents means you can see what to put in
+    # BOT_ALLOWED_CALLER_IDS instead of guessing -- local testing only, never
+    # do this in bot/app.py (production).
+    print("[local_playground] caller_id from this activity: {0}".format(_caller_id(context.activity)))
     await handle_message(context, _config, _sources, _queries)
 
 
