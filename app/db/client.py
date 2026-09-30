@@ -54,6 +54,13 @@ def _build_bind_parameters(
 
 
 def _connect(config: AppConfig):
+    if config.auth_mode is AuthMode.PAT:
+        return databricks_sql.connect(
+            server_hostname=config.databricks_host,
+            http_path=config.databricks_http_path,
+            access_token=config.token,
+        )
+
     if config.auth_mode is AuthMode.SERVICE_PRINCIPAL:
         from databricks.sdk.core import Config as SdkConfig
         from databricks.sdk.core import oauth_service_principal
