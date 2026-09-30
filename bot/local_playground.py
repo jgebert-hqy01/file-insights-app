@@ -1,15 +1,31 @@
 """Local-only entry point for testing the bot with the Microsoft 365 Agents
-Playground -- no Azure Bot resource, no app registration, no managed
-identity, no auth at all. Never use this for anything but local testing;
-see bot/app.py for the real, authenticated production entry point.
+Playground -- no Azure Bot resource, no real app registration, no managed
+identity. Never use this for anything but local testing; see bot/app.py
+for the real, authenticated production entry point.
 
-Run:
+The installed SDK version's CloudAdapter requires a connection_manager to
+even construct (there's no bare-anonymous-mode constructor in the current
+API, despite older docs describing one) -- so this uses the exact same
+MsalConnectionManager/CloudAdapter pattern bot/app.py uses, just fed
+obviously-fake, local-only placeholder credentials via
+CONNECTIONS__SERVICE_CONNECTION__SETTINGS__* env vars. These are never
+real secrets and this path never makes a real Azure AD call for the
+Playground's "emulator" channel; if that assumption turns out wrong,
+the error will look different from the one this fixes -- report back.
 
+Run (with fake placeholder values, never real credentials):
+
+    export CONNECTIONS__SERVICE_CONNECTION__SETTINGS__AUTHTYPE=ClientSecret
+    export CONNECTIONS__SERVICE_CONNECTION__SETTINGS__CLIENTID=local-playground-test
+    export CONNECTIONS__SERVICE_CONNECTION__SETTINGS__CLIENTSECRET=local-playground-test
+    export CONNECTIONS__SERVICE_CONNECTION__SETTINGS__TENANTID=local-playground-test
     python bot/local_playground.py
 
-then, in a separate terminal:
+then, in a separate terminal, install and run the Agents Playground
+(renamed from @microsoft/teams-app-test-tool as of late 2026):
 
-    npx @microsoft/teams-app-test-tool
+    npm install -g @microsoft/m365agentsplayground
+    agentsplayground -e "http://localhost:3978/api/messages" -c "emulator"
 
 which opens a browser-based chat simulator that talks to this bot exactly
 the way Teams would, without needing real Teams, a tenant, or a network
@@ -26,6 +42,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from aiohttp.web import Application, Request, Response, run_app
+from microsoft_agents.activity import load_configuration_from_env
+from microsoft_agents.authentication.msal import MsalConnectionManager
 from microsoft_agents.hosting.aiohttp import CloudAdapter, start_agent_process
 from microsoft_agents.hosting.core import AgentApplication, MemoryStorage, TurnContext, TurnState
 
@@ -36,7 +54,12 @@ from bot.handlers import _caller_id, handle_message  # _caller_id: diagnostic us
 _config = load_config()
 _sources, _queries = load_registries()
 
-AGENT_APP = AgentApplication[TurnState](storage=MemoryStorage(), adapter=CloudAdapter())
+_agents_sdk_config = load_configuration_from_env(os.environ)
+_connection_manager = MsalConnectionManager(**_agents_sdk_config)
+
+AGENT_APP = AgentApplication[TurnState](
+    storage=MemoryStorage(), adapter=CloudAdapter(connection_manager=_connection_manager)
+)
 
 
 @AGENT_APP.activity("message")
