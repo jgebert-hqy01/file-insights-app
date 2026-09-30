@@ -16,6 +16,14 @@ the way Teams would, without needing real Teams, a tenant, or a network
 path to Azure Bot Service.
 """
 import os
+import sys
+
+# `python bot/local_playground.py` puts this file's own directory (bot/) on
+# sys.path[0], not the repo root -- and bot/ also contains a file literally
+# named app.py, which would otherwise shadow the real app/ package for
+# `from app.X import Y` below. Same fix as app/main.py and
+# scripts/smoke_test.py, for the same underlying reason.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from aiohttp.web import Application, Request, Response, run_app
 from microsoft_agents.hosting.aiohttp import CloudAdapter, start_agent_process

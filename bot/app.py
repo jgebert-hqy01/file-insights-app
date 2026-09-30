@@ -16,6 +16,14 @@ This is the bot's *own* identity for talking to Azure Bot Service --
 unrelated to how the app talks to Databricks (app/config.py, separately).
 """
 import os
+import sys
+
+# `python bot/app.py` puts this file's own directory (bot/) on sys.path[0],
+# not the repo root -- and this file is itself literally named app.py,
+# which would otherwise shadow the real app/ package for the
+# `from app.X import Y` imports below. Same fix as app/main.py,
+# scripts/smoke_test.py, and bot/local_playground.py, for the same reason.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from aiohttp.web import Application, Request, Response, run_app
 from microsoft_agents.activity import load_configuration_from_env
