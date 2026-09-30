@@ -3,15 +3,17 @@ Playground -- no Azure Bot resource, no real app registration, no managed
 identity. Never use this for anything but local testing; see bot/app.py
 for the real, authenticated production entry point.
 
-The installed SDK version's CloudAdapter requires a connection_manager to
-even construct (there's no bare-anonymous-mode constructor in the current
-API, despite older docs describing one) -- so this uses the exact same
-MsalConnectionManager/CloudAdapter pattern bot/app.py uses, just fed
-obviously-fake, local-only placeholder credentials via
-CONNECTIONS__SERVICE_CONNECTION__SETTINGS__* env vars. These are never
-real secrets and this path never makes a real Azure AD call for the
-Playground's "emulator" channel; if that assumption turns out wrong,
-the error will look different from the one this fixes -- report back.
+The installed SDK version requires both CloudAdapter and AgentApplication
+to be constructed with a connection_manager (AgentApplication needs its
+own, to build an Authorization instance) -- there's no bare-anonymous-mode
+constructor in the current API, despite older docs describing one. So
+this uses the exact same MsalConnectionManager/CloudAdapter/Authorization
+pattern bot/app.py uses, just fed obviously-fake, local-only placeholder
+credentials via CONNECTIONS__SERVICE_CONNECTION__SETTINGS__* env vars.
+These are never real secrets and this path should never need to make a
+real Azure AD call for the Playground's "emulator" channel; if that
+assumption turns out wrong, the error will look different from the one
+this fixes -- report back.
 
 Run (with fake placeholder values, never real credentials):
 
@@ -45,7 +47,13 @@ from aiohttp.web import Application, Request, Response, run_app
 from microsoft_agents.activity import load_configuration_from_env
 from microsoft_agents.authentication.msal import MsalConnectionManager
 from microsoft_agents.hosting.aiohttp import CloudAdapter, start_agent_process
-from microsoft_agents.hosting.core import AgentApplication, MemoryStorage, TurnContext, TurnState
+from microsoft_agents.hosting.core import (
+    AgentApplication,
+    Authorization,
+    MemoryStorage,
+    TurnContext,
+    TurnState,
+)
 
 from app.config import load_config
 from app.registry.loader import load_registries
@@ -54,11 +62,22 @@ from bot.handlers import _caller_id, handle_message  # _caller_id: diagnostic us
 _config = load_config()
 _sources, _queries = load_registries()
 
+# Mirrors bot/app.py's construction exactly (AgentApplication itself needs
+# its own connection_manager to build an Authorization instance, separate
+# from the adapter's) -- only the credential *values* differ, and only the
+# jwt_authorization_middleware on the web app below is intentionally
+# skipped, since this is local-only.
 _agents_sdk_config = load_configuration_from_env(os.environ)
+_storage = MemoryStorage()
 _connection_manager = MsalConnectionManager(**_agents_sdk_config)
+_adapter = CloudAdapter(connection_manager=_connection_manager)
+_authorization = Authorization(_storage, _connection_manager, **_agents_sdk_config)
 
 AGENT_APP = AgentApplication[TurnState](
-    storage=MemoryStorage(), adapter=CloudAdapter(connection_manager=_connection_manager)
+    storage=_storage,
+    adapter=_adapter,
+    authorization=_authorization,
+    **_agents_sdk_config,
 )
 
 
