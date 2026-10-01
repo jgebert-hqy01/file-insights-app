@@ -38,7 +38,7 @@ bash startup.sh
 | --- | --- | --- |
 | `DATABRICKS_HOST` | `<workspace-host>.azuredatabricks.net` | Not a secret. |
 | `DATABRICKS_HTTP_PATH` | `/sql/1.0/warehouses/<warehouse-id>` | Not a secret. |
-| `DATABRICKS_AUTH_MODE` | `service_principal` | Selects the OAuth M2M path in `app/config.py`. |
+| `DATABRICKS_AUTH_MODE` | `oauth-m2m` | Selects the OAuth M2M path in `app/config.py`. Never `pat` here -- that mode refuses to start when `WEBSITE_SITE_NAME` is set (App Service always sets it). |
 | `DATABRICKS_CLIENT_ID` | the service principal's Application ID | Not a secret, but keep alongside the secret for clarity. |
 | `DATABRICKS_CLIENT_SECRET` | `@Microsoft.KeyVault(VaultName=<vault-name>;SecretName=<secret-name>)` | Key Vault reference -- never a literal value. |
 | `DEFAULT_ROW_CAP` | `500` | Optional; this is the default if unset. |
